@@ -1,0 +1,575 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8">
+    <title>P'titCurieux – Scanner Cyber</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
+</head>
+
+<body>
+    <div class="app">
+        <header class="header">
+            <div class="header-left">
+                <div class="logo-box">
+                    <img src="{% static 'images/logo.png' %}" alt="Logo P'titCurieux" class="logo-img">
+                </div>
+            </div>
+            <div class="header-center">
+                <h1 class="title">P'titCurieux – Scanner Cyber</h1>
+                <p id="status" class="status">État du scan : Prêt</p>
+            </div>
+            <div class="header-right"></div>
+        </header>
+
+        <main class="main">
+            <section class="sidebar">
+                <input id="ip" class="input" placeholder="Adresse IP / Hôte" value="127.0.0.1">
+                <input id="ports" class="input" placeholder="Plage ports (ex: 22-443)">
+
+                <select id="mode" class="select">
+                    <option>Rapide</option>
+                    <option>Complet</option>
+                </select>
+
+                <div class="module-box">
+                    <div class="module-title">Scans à exécuter</div>
+
+                    <label class="check-row">
+                        <input type="checkbox" id="scan_nmap" checked>
+                        <span>Scan Nmap</span>
+                    </label>
+
+                    <label class="check-row">
+                        <input type="checkbox" id="scan_smb" checked>
+                        <span>Test d’accès SMB invité</span>
+                    </label>
+
+                    <label class="check-row">
+                        <input type="checkbox" id="scan_ftp" checked>
+                        <span>Test de connexion FTP anonyme</span>
+                    </label>
+
+                    <label class="check-row">
+                        <input type="checkbox" id="scan_ldap" checked>
+                        <span>Test de bind LDAP anonyme</span>
+                    </label>
+                </div>
+
+                <button id="scanBtn" class="btn-primary" onclick="startScan()">Lancer le scan</button>
+
+                <div class="progress-bar">
+                    <div id="progress" class="progress-inner"></div>
+                </div>
+
+                <div class="export-row">
+                    <select id="exportFormat" class="select export-select">
+                        <option value="json">Export JSON</option>
+                        <option value="txt">Export TXT</option>
+                        <option value="csv">Export CSV</option>
+                    </select>
+                    <button id="exportBtn" class="btn-secondary" onclick="exportResults()">Exporter
+                        résultats</button>
+                </div>
+            </section>
+
+            <section class="output-panel">
+                <pre id="output" class="output">Bienvenue sur P'titCurieux !
+
+Aucun scan lancé. Entrez une IP et cliquez sur "Lancer le scan".</pre>
+            </section>
+        </main>
+    </div>
+
+    <script>
+        let results = {};
+        let currentScanId = null;
+
+        function getSelectedModules() {
+            return {
+                nmap: document.getElementById('scan_nmap').checked,
+                smb: document.getElementById('scan_smb').checked,
+                ftp: document.getElementById('scan_ftp').checked,
+                ldap: document.getElementById('scan_ldap').checked
+            };
+        }
+
+        function getSelectedModulesList(modules) {
+            return Object.entries(modules)
+                .filter(([_, enabled]) => enabled)
+                .map(([name]) => name.toUpperCase());
+        }
+
+        function appendLine(text = '') {
+            const output = document.getElementById('output');
+            output.textContent += text + '\n';
+        }
+
+        function clearOutput() {
+            document.getElementById('output').textContent = '';
+        }
+
+        function yesNoToText(value) {
+            return value ? 'oui' : 'non';
+        }
+
+        function allowedToText(value) {
+            return value ? 'autorisé' : 'refusé';
+        }
+
+        function severityToText(severity) {
+            if (severity === 'high') return 'ÉLEVÉ';
+            if (severity === 'medium') return 'MODÉRÉ';
+            if (severity === 'low') return 'FAIBLE';
+            return 'INFO';
+        }
+
+        function renderSummary(data) {
+            appendLine('RÉSUMÉ');
+            appendLine(`- Cible : ${data.target || 'N/A'}`);
+            appendLine(`- Mode : ${data.mode || 'N/A'}`);
+            appendLine(`- Ports saisis : ${data.ports_input || 'auto'}`);
+
+            const selected = data.selected_modules || {};
+            const selectedList = Object.entries(selected)
+                .filter(([_, enabled]) => enabled)
+                .map(([key]) => key.toUpperCase());
+
+            appendLine(`- Modules exécutés : ${selectedList.length ? selectedList.join(', ') : 'aucun'}`);
+
+            if (data.summary) {
+                if (selected.nmap) appendLine(`- Nombre de ports ouverts : ${data.summary.open_ports_count ?? 0}`);
+                if (selected.smb) appendLine(`- SMB anonyme : ${yesNoToText(data.summary.smb_anonymous)}`);
+                if (selected.ftp) appendLine(`- FTP anonyme : ${yesNoToText(data.summary.ftp_anonymous)}`);
+                if (selected.ldap) appendLine(`- LDAP anonyme : ${yesNoToText(data.summary.ldap_anonymous)}`);
+            }
+
+            appendLine('');
+        }
+
+        function renderRisk(data) {
+            if (!data.risk_assessment) return;
+
+            appendLine('ÉVALUATION DU RISQUE');
+            appendLine(`- Niveau : ${String(data.risk_assessment.level || 'faible').toUpperCase()}`);
+            appendLine(`- Score : ${data.risk_assessment.score ?? 0}/100`);
+
+            const findings = data.risk_assessment.findings || [];
+            if (findings.length === 0) {
+                appendLine('- Aucun point notable détecté');
+            } else {
+                for (const finding of findings) {
+                    appendLine(`- [${severityToText(finding.severity)}] ${finding.title} : ${finding.detail}`);
+                }
+            }
+
+            appendLine('');
+        }
+
+        function renderAuthSurface(data) {
+            if (!data.auth_surface) return;
+
+            appendLine("SURFACE D'AUTHENTIFICATION");
+            const services = data.auth_surface.services || [];
+
+            if (services.length === 0) {
+                appendLine("- Aucun service d'authentification sensible détecté via Nmap");
+                appendLine('');
+                return;
+            }
+
+            for (const item of services) {
+                appendLine(`- ${item.service.toUpperCase()} : ports ${item.ports.join(', ')}`);
+            }
+
+            appendLine('');
+        }
+
+        function renderNmap(data) {
+            if (!data.nmap) return;
+
+            appendLine('NMAP');
+            const ports = data.nmap.ports || {};
+
+            if (Object.keys(ports).length === 0) {
+                appendLine('- Aucun port détecté');
+                appendLine('');
+                return;
+            }
+
+            const sortedPorts = Object.entries(ports).sort((a, b) => Number(a[0]) - Number(b[0]));
+
+            for (const [port, info] of sortedPorts) {
+                const state = info.state || 'unknown';
+                const service = info.service || 'unknown';
+                appendLine(`- Port ${port}: ${state} (${service})`);
+            }
+
+            appendLine('');
+        }
+
+        function renderSmb(data) {
+            if (!data.smb) return;
+
+            appendLine('SMB INVITÉ');
+            appendLine(`- Test exécuté : ${yesNoToText(!!data.smb.executed)}`);
+            appendLine(`- Accès anonyme : ${allowedToText(!!data.smb.allowed)}`);
+
+            if (Array.isArray(data.smb.shares) && data.smb.shares.length > 0) {
+                appendLine(`- Partages visibles : ${data.smb.shares.join(', ')}`);
+            } 
+
+            if (data.smb.execution_reason) {
+                appendLine(`- Raison d'exécution : ${data.smb.execution_reason}`);
+            }
+
+            if (data.smb.message) {
+                appendLine(`- Message : ${data.smb.message}`);
+            }
+
+            appendLine('');
+        }
+
+        function renderFtp(data) {
+            if (!data.ftp) return;
+
+            appendLine('FTP ANONYME');
+            appendLine(`- Test exécuté : ${yesNoToText(!!data.ftp.executed)}`);
+            appendLine(`- Accès anonyme : ${allowedToText(!!data.ftp.allowed)}`);
+
+            if (Array.isArray(data.ftp.entries) && data.ftp.entries.length > 0) {
+                appendLine(`- Entrées visibles : ${data.ftp.entries.join(', ')}`);
+            }
+
+            if (data.ftp.execution_reason) {
+                appendLine(`- Raison d'exécution : ${data.ftp.execution_reason}`);
+            }
+
+            if (data.ftp.message) {
+                appendLine(`- Message : ${data.ftp.message}`);
+            }
+
+            appendLine('');
+        }
+
+        function renderLdap(data) {
+            if (!data.ldap) return;
+
+            appendLine('LDAP ANONYME');
+            appendLine(`- Test exécuté : ${yesNoToText(!!data.ldap.executed)}`);
+            appendLine(`- Bind anonyme : ${allowedToText(!!data.ldap.allowed)}`);
+
+            if (Array.isArray(data.ldap.naming_contexts) && data.ldap.naming_contexts.length > 0) {
+                appendLine(`- Naming contexts : ${data.ldap.naming_contexts.join(', ')}`);
+            }
+
+            if (data.ldap.execution_reason) {
+                appendLine(`- Raison d'exécution : ${data.ldap.execution_reason}`);
+            }
+
+            if (data.ldap.message) {
+                appendLine(`- Message : ${data.ldap.message}`);
+            }
+
+            appendLine('');
+        }
+
+        function buildTxtExport(data) {
+            const lines = [];
+
+            lines.push("P'titCurieux - Rapport d'audit");
+            lines.push('================================');
+            lines.push(`Cible: ${data.target || 'N/A'}`);
+            lines.push(`Mode: ${data.mode || 'N/A'}`);
+            lines.push(`Ports saisis: ${data.ports_input || 'auto'}`);
+
+            const selected = data.selected_modules || {};
+            const selectedList = Object.entries(selected)
+                .filter(([_, enabled]) => enabled)
+                .map(([key]) => key.toUpperCase());
+            lines.push(`Modules sélectionnés: ${selectedList.join(', ') || 'aucun'}`);
+            lines.push('');
+
+            if (data.summary) {
+                lines.push('Résumé');
+                if (selected.nmap) lines.push(`- Nombre de ports ouverts: ${data.summary.open_ports_count ?? 0}`);
+                if (selected.smb) lines.push(`- SMB anonyme: ${yesNoToText(data.summary.smb_anonymous)}`);
+                if (selected.ftp) lines.push(`- FTP anonyme: ${yesNoToText(data.summary.ftp_anonymous)}`);
+                if (selected.ldap) lines.push(`- LDAP anonyme: ${yesNoToText(data.summary.ldap_anonymous)}`);
+                lines.push('');
+            }
+
+            if (data.risk_assessment) {
+                lines.push('Évaluation du risque');
+                lines.push(`- Niveau: ${String(data.risk_assessment.level || 'faible').toUpperCase()}`);
+                lines.push(`- Score: ${data.risk_assessment.score ?? 0}/100`);
+                const findings = data.risk_assessment.findings || [];
+                for (const finding of findings) {
+                    lines.push(`- [${severityToText(finding.severity)}] ${finding.title}: ${finding.detail}`);
+                }
+                lines.push('');
+            }
+
+            if (data.auth_surface) {
+                lines.push("Surface d'authentification");
+                const services = data.auth_surface.services || [];
+                if (services.length === 0) {
+                    lines.push("- Aucun service détecté");
+                } else {
+                    for (const item of services) {
+                        lines.push(`- ${item.service.toUpperCase()}: ports ${item.ports.join(', ')}`);
+                    }
+                }
+                lines.push('');
+            }
+
+            if (data.nmap) {
+                lines.push('NMAP');
+                const ports = data.nmap.ports || {};
+                if (Object.keys(ports).length === 0) {
+                    lines.push('- Aucun port détecté');
+                } else {
+                    const sortedPorts = Object.entries(ports).sort((a, b) => Number(a[0]) - Number(b[0]));
+                    for (const [port, info] of sortedPorts) {
+                        lines.push(`- Port ${port}: ${info.state || 'unknown'} (${info.service || 'unknown'})`);
+                    }
+                }
+                lines.push('');
+            }
+
+            if (data.smb) {
+                lines.push('SMB INVITÉ');
+                lines.push(`- Test exécuté: ${yesNoToText(!!data.smb.executed)}`);
+                lines.push(`- Accès anonyme: ${allowedToText(!!data.smb.allowed)}`);
+                lines.push(`- Partages visibles: ${(data.smb.shares || []).join(', ') || 'aucun'}`);
+                if (data.smb.execution_reason) lines.push(`- Raison d'exécution: ${data.smb.execution_reason}`);
+                if (data.smb.message) lines.push(`- Message: ${data.smb.message}`);
+                lines.push('');
+            }
+
+            if (data.ftp) {
+                lines.push('FTP ANONYME');
+                lines.push(`- Test exécuté: ${yesNoToText(!!data.ftp.executed)}`);
+                lines.push(`- Accès anonyme: ${allowedToText(!!data.ftp.allowed)}`);
+                if ((data.ftp.entries || []).length > 0) lines.push(`- Entrées visibles: ${data.ftp.entries.join(', ')}`);
+                if (data.ftp.execution_reason) lines.push(`- Raison d'exécution: ${data.ftp.execution_reason}`);
+                if (data.ftp.message) lines.push(`- Message: ${data.ftp.message}`);
+                lines.push('');
+            }
+
+            if (data.ldap) {
+                lines.push('LDAP ANONYME');
+                lines.push(`- Test exécuté: ${yesNoToText(!!data.ldap.executed)}`);
+                lines.push(`- Bind anonyme: ${allowedToText(!!data.ldap.allowed)}`);
+                if ((data.ldap.naming_contexts || []).length > 0) lines.push(`- Naming contexts: ${data.ldap.naming_contexts.join(', ')}`);
+                if (data.ldap.execution_reason) lines.push(`- Raison d'exécution: ${data.ldap.execution_reason}`);
+                if (data.ldap.message) lines.push(`- Message: ${data.ldap.message}`);
+                lines.push('');
+            }
+
+            return lines.join('\n');
+        }
+
+        function buildCsvExport(data) {
+            const rows = [];
+            rows.push(['section', 'key', 'value']);
+
+            rows.push(['general', 'target', data.target || '']);
+            rows.push(['general', 'mode', data.mode || '']);
+            rows.push(['general', 'ports_input', data.ports_input || '']);
+
+            const selected = data.selected_modules || {};
+            for (const [name, enabled] of Object.entries(selected)) {
+                rows.push(['selected_modules', name, enabled ? 'true' : 'false']);
+            }
+
+            if (data.summary) {
+                rows.push(['summary', 'open_ports_count', String(data.summary.open_ports_count ?? 0)]);
+                rows.push(['summary', 'smb_anonymous', String(!!data.summary.smb_anonymous)]);
+                rows.push(['summary', 'ftp_anonymous', String(!!data.summary.ftp_anonymous)]);
+                rows.push(['summary', 'ldap_anonymous', String(!!data.summary.ldap_anonymous)]);
+            }
+
+            if (data.risk_assessment) {
+                rows.push(['risk', 'level', data.risk_assessment.level || '']);
+                rows.push(['risk', 'score', String(data.risk_assessment.score ?? 0)]);
+                for (const finding of (data.risk_assessment.findings || [])) {
+                    rows.push(['risk_finding', finding.severity || '', `${finding.title} - ${finding.detail}`]);
+                }
+            }
+
+            if (data.auth_surface) {
+                for (const item of (data.auth_surface.services || [])) {
+                    rows.push(['auth_surface', item.service, item.ports.join('|')]);
+                }
+            }
+
+            if (data.nmap && data.nmap.ports) {
+                for (const [port, info] of Object.entries(data.nmap.ports)) {
+                    rows.push(['nmap', `port_${port}_state`, info.state || '']);
+                    rows.push(['nmap', `port_${port}_service`, info.service || '']);
+                }
+            }
+
+            if (data.smb) {
+                rows.push(['smb', 'executed', String(!!data.smb.executed)]);
+                rows.push(['smb', 'allowed', String(!!data.smb.allowed)]);
+                rows.push(['smb', 'shares', (data.smb.shares || []).join('|')]);
+                rows.push(['smb', 'reason', data.smb.execution_reason || '']);
+                rows.push(['smb', 'message', data.smb.message || '']);
+            }
+
+            if (data.ftp) {
+                rows.push(['ftp', 'executed', String(!!data.ftp.executed)]);
+                rows.push(['ftp', 'allowed', String(!!data.ftp.allowed)]);
+                rows.push(['ftp', 'entries', (data.ftp.entries || []).join('|')]);
+                rows.push(['ftp', 'reason', data.ftp.execution_reason || '']);
+                rows.push(['ftp', 'message', data.ftp.message || '']);
+            }
+
+            if (data.ldap) {
+                rows.push(['ldap', 'executed', String(!!data.ldap.executed)]);
+                rows.push(['ldap', 'allowed', String(!!data.ldap.allowed)]);
+                rows.push(['ldap', 'naming_contexts', (data.ldap.naming_contexts || []).join('|')]);
+                rows.push(['ldap', 'reason', data.ldap.execution_reason || '']);
+                rows.push(['ldap', 'message', data.ldap.message || '']);
+            }
+
+            return rows.map(row =>
+                row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(',')
+            ).join('\n');
+        }
+
+        function downloadContent(filename, content, mimeType) {
+            const blob = new Blob([content], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        async function startScan() {
+            const ip = document.getElementById('ip').value || '127.0.0.1';
+            const ports = document.getElementById('ports').value;
+            const mode = document.getElementById('mode').value;
+            const modules = getSelectedModules();
+
+            const status = document.getElementById('status');
+            const btn = document.getElementById('scanBtn');
+            const progress = document.getElementById('progress');
+            const output = document.getElementById('output');
+
+            if (!Object.values(modules).some(Boolean)) {
+                clearOutput();
+                appendLine('Veuillez sélectionner au moins un module de scan.');
+                status.textContent = 'État du scan : Aucun module sélectionné';
+                return;
+            }
+
+            status.textContent = 'État du scan : En cours...';
+            btn.disabled = true;
+            progress.style.width = '18%';
+            clearOutput();
+
+            const selectedList = getSelectedModulesList(modules);
+            appendLine(`Scan de ${ip} (${ports || 'auto'}) en mode ${mode}...`);
+            appendLine(`Modules sélectionnés : ${selectedList.join(', ')}`);
+            appendLine('');
+
+            setTimeout(() => { progress.style.width = '52%'; }, 400);
+
+            try {
+                const response = await fetch('/api/scan/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        ip: ip,
+                        ports: ports,
+                        mode: mode,
+                        modules: modules
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    results = data.results;
+                    currentScanId = data.scan_id;
+
+                    const now = new Date().toLocaleString('fr-FR');
+                    appendLine(`[${now}] Résultats de l'audit`);
+                    appendLine('');
+
+                    renderSummary(results);
+                    renderRisk(results);
+                    renderAuthSurface(results);
+                    renderNmap(results);
+                    renderSmb(results);
+                    renderFtp(results);
+                    renderLdap(results);
+
+                    status.textContent = 'État du scan : Terminé ✅';
+                } else {
+                    const now = new Date().toLocaleString('fr-FR');
+                    appendLine(`[${now}] Erreur : ${data.error || 'Erreur inconnue'}`);
+                    if (data.details) {
+                        appendLine(data.details);
+                    }
+                    status.textContent = 'État du scan : Échec ❌';
+                }
+            } catch (e) {
+                const now = new Date().toLocaleString('fr-FR');
+                appendLine(`[${now}] Erreur de connexion : ${e.message}`);
+                status.textContent = 'État du scan : Erreur de connexion ❌';
+            }
+
+            progress.style.width = '100%';
+            btn.disabled = false;
+            output.scrollTop = output.scrollHeight;
+        }
+
+        function exportResults() {
+            if (!results || Object.keys(results).length === 0) {
+                alert('Aucun résultat à exporter');
+                return;
+            }
+
+            const format = document.getElementById('exportFormat').value;
+            const timestamp = new Date().getTime();
+
+            if (format === 'json') {
+                downloadContent(
+                    `audit_results_${timestamp}.json`,
+                    JSON.stringify(results, null, 2),
+                    'application/json'
+                );
+                return;
+            }
+
+            if (format === 'txt') {
+                downloadContent(
+                    `audit_results_${timestamp}.txt`,
+                    buildTxtExport(results),
+                    'text/plain;charset=utf-8'
+                );
+                return;
+            }
+
+            if (format === 'csv') {
+                downloadContent(
+                    `audit_results_${timestamp}.csv`,
+                    buildCsvExport(results),
+                    'text/csv;charset=utf-8'
+                );
+            }
+        }
+    </script>
+</body>
+
+</html>

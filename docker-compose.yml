@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # Backend - Linux avec outils de scan
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ptitcurieux-backend
+    ports:
+      - "5000:5000"
+    networks:
+      - scanner-network
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=1
+    volumes:
+      - ./backend:/app
+      - scan-results:/app/results
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend - Django
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ptitcurieux-frontend
+    ports:
+      - "8000:8000"
+    networks:
+      - scanner-network
+    environment:
+      - DJANGO_SETTINGS_MODULE=ptitcurieux.settings
+      - BACKEND_API_URL=http://backend:5000
+    volumes:
+      - ./frontend:/app
+    depends_on:
+      - backend
+    restart: unless-stopped
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py collectstatic --noinput &&
+             python manage.py runserver 0.0.0.0:8000"
+
+networks:
+  scanner-network:
+    driver: bridge
+
+volumes:
+  scan-results:
